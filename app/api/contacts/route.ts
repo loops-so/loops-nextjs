@@ -1,54 +1,105 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import LoopsClient from "loops";
+import { RateLimitExceededError } from "loops";
 
-const loops = new LoopsClient(process.env.LOOPS_API_KEY as string);
+import { getLoopsClient, toErrorResponse } from "@/app/api/_lib/loops";
 
-
-/**
- * Create or Update a contact
- */
 export async function POST(request: NextRequest) {
-  // Contact properties can be sent as JSON along with the email address
+  const loops = getLoopsClient();
+  const body = await request.json();
+  const email = body?.email;
+  const userId = body?.userId;
+  const properties = body?.properties ?? {};
+  const mailingLists = body?.mailingLists;
 
-  const res = await request.json();
+  const queryParams = new URL(request.url).searchParams;
+  if (queryParams.has("ratelimit")) {
+    const promises: Promise<unknown>[] = [];
+    const numRequests = 15;
+    const batchProperties = { testValue: Date.now() };
 
-  const email = res["email"];
+    for (let i = 0; i < numRequests; i++) {
+      promises.push(
+        loops.updateContact({
+          email,
+          userId,
+          properties: { ...batchProperties, iteration: i },
+        })
+      );
+    }
 
-  const data = await loops.createContact(email);
+    const results = { success: 0, rateLimited: 0, errors: 0 };
+    const settled = await Promise.allSettled(promises);
+    for (const result of settled) {
+      if (result.status === "fulfilled") {
+        results.success++;
+      } else if (result.reason instanceof RateLimitExceededError) {
+        results.rateLimited++;
+      } else {
+        results.errors++;
+      }
+    }
 
-  // Other options for adding properties and updating a contact
-  // const properties = { plan: 'Pro' }
-  // const data = await loops.createContact(email, properties)
-  // const data = await loops.updateContact(email, properties)
+    return NextResponse.json(results);
+  }
 
-  return NextResponse.json({ data });
+  try {
+    const data = await loops.updateContact({
+      email,
+      userId,
+      properties,
+      mailingLists,
+    });
+    return NextResponse.json({ data });
+  } catch (error) {
+    return toErrorResponse(error);
+  }
 }
 
-/**
- * Search for a contact by email
- */
 export async function GET(request: NextRequest) {
+  const loops = getLoopsClient();
   const searchParams = request.nextUrl.searchParams;
-  const query: string | null = searchParams.get("q");
+  const email = searchParams.get("q") ?? searchParams.get("email");
+  const userId = searchParams.get("userId");
 
-  if (!query) throw "No email given";
+  if (!email && !userId) {
+    return NextResponse.json(
+      { error: true, message: "Provide either `email` (or `q`) or `userId`." },
+      { status: 400 }
+    );
+  }
 
-  const data = await loops.findContact(query);
+  if (email && userId) {
+    return NextResponse.json(
+      { error: true, message: "Provide only one of `email`/`q` or `userId`." },
+      { status: 400 }
+    );
+  }
 
-  return NextResponse.json({ data });
+  try {
+    const data = await loops.findContact({
+      email: email ?? undefined,
+      userId: userId ?? undefined,
+    });
+    return NextResponse.json({ data });
+  } catch (error) {
+    return toErrorResponse(error);
+  }
 }
 
-/**
- * Delete a contact
- */
 export async function DELETE(request: NextRequest) {
+  const loops = getLoopsClient();
   const searchParams = request.nextUrl.searchParams;
-  const email: string | null = searchParams.get("email");
+  const email = searchParams.get("email");
+  const userId = searchParams.get("userId");
 
-  if (!email) throw "No email given";
-
-  const data = await loops.deleteContact({ email });
-
-  return NextResponse.json({ data });
+  try {
+    const data = await loops.deleteContact({
+      email: email ?? undefined,
+      userId: userId ?? undefined,
+    });
+    return NextResponse.json({ data });
+  } catch (error) {
+    return toErrorResponse(error);
+  }
 }
